@@ -1,5 +1,30 @@
 package grpc
 
+// Address 表示一个client所连接上的server地址信息
+type Address struct {
+	// server 的地址
+	Addr string
+	// metadata 表示server的相关信息，可以用来决定流量负载均衡的策略
+	Metadata interface{}
+}
+
+// BalancerConfig 表示 Balnacer的配置
+type BalancerConfig struct {
+	// DialCreds 是传输层的证书，Balancer的实现用此证书去和远端的负载均衡server建立连接。如果不需要加密传输，则可以忽略此证书
+	DialCreds credentials.TransportCredentials
+	// Dialer 是Balancer用于和远端的负载均衡server建立连接的dialer,如果不需要和远端负载均衡server建立连接，则可以忽略
+	Dialer func(context.Context, string) (net.Conn, error)
+}
+
+// Balancer 为RPC选择地址,负载均衡器
+type Balancer interface {
+	// Start 函数做一些启动Balancer的初始化的工作。比如：启动name resolution 和 watch update. 这些会在dial的过程中被调用
+	Start(target string, config BalancerConfig) error
+	// Up 表示grpc有一个连上addr server的链接。如果连接处于丢失或者关闭的状态，则返回一个down的错误处理函数
+	// 目前并不十分清楚如何构建和利用这有意义的错误参数down。可能在后面会给出比较实际的指导用法
+	Up(addr Address) (down func(error))
+}
+
 func (rr *roundRobin) Start(targe string, config BalancerConfig) error {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
