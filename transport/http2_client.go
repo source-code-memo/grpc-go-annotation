@@ -1,5 +1,70 @@
 package transport
 
+/*
+type Addr interface {
+	NetWork() string // name of the network (for example, "tcp", "udp")
+	String() string // string form of address (for example, "192.0.2.1:25", "[2001:db8::1]:80")
+}
+*/
+// http2Client 使用HTTP2实现了clientTransport的接口
+type http2Client struct {
+	ctx         context.Context
+	target      string // server 名字或者地址
+	userAgent   string
+	md          interface{} // metadata
+	conn        net.Conn    // 底层的通信通道
+	retmoteAddr net.Addr
+	locateAddr  net.Addr
+	authInfo    credentials.AuthInfo // 连接的认证信息
+	nextID      uint32               // 下一个需要使用的streamID
+
+	// writeableChan 同步写的权限去transport
+	// writer 需要通过往writeableChan发送数据来获取writelock
+	// 通过从writeableChan接收数据来释放锁
+	writeableChan chan int
+	// shutdownChan 在Close被调用的时候关闭
+	//
+	shutdownChan chan struct{}
+	// errorChan是用来通知调用放I/O错误
+	errorChan chan struct{}
+	// goAway 在关闭时用来通知上层的调用方(如 addrConn.transportMonitor)
+	// 告诉调用方server在这个transport上发送了GoAway信号
+	goAway chan struct{}
+	// awakenKeepalive 用于在底层transport休眠的时候唤醒它(发送ping的心跳)
+	awakenKeepalive chan struct{}
+
+	framer *framer
+	hBuf   *bytes.Buffer  // HPACK的编码buffer
+	hEnc   *hpack.Encoder // HPACK的编码器
+
+	// controlBuf 传递所有的控制controller相关的任务
+	// 如: window的更新, reset流, 变量的设置
+	controlBuf *controlBuffer
+	fc         *inFlow
+	// sendQuotaPool 提供了带外信息的流控
+	sendQuotaPool *quotaPool
+	// streamsQuota 限制并发stream的最大数目
+	streamsQuota *quotaPool
+
+	// 使用的scheme, https 或者 http
+	scheme string
+
+	isSecure bool
+
+	creds []credentials.PerRPCCredentials
+
+	// 跟踪transport上读取行为
+	// 1表示 true ,0 是false
+	activity uint32
+	kp       keepalive.ClientParameters
+
+	statsHandler stats.Handler
+
+	initialWindownSize int32
+
+	bdpEst *bdpEstimator
+}
+
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr string) (net.Conn, error) {
 	if fn != nil {
 		return fn(ctx, addr)
