@@ -62,7 +62,20 @@ type http2Client struct {
 
 	initialWindownSize int32
 
-	bdpEst *bdpEstimator
+	bdpEst          *bdpEstimator
+	outQuotaVersion uint32
+
+	mu            sync.Mutex // 保护以下的变量
+	state         transportState
+	activeStreams map[uint32]*Stream
+	// 并发的stream的最大数目
+	maxStreams int
+	// 对方设置的每个stream的带外流控制的窗口大小
+	streamSendQuota uint32
+	// prevGoAway ID 记录 前一个GOAway frame中的Last-Stream-ID
+	prevGoAwayID uint32
+	// goAwayReason 记录http2.ErrCode和收到的GoAway帧中的debug数据
+	goAwayReason GoAwayReason
 }
 
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr string) (net.Conn, error) {
