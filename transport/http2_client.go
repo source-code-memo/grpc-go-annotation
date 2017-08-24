@@ -137,4 +137,70 @@ func newHTTP2Client(ctx context.Context, addr TargetInfo, opts ConnectOptions) (
 		icwz = opts.InitialConnWindowSize
 	}
 	var buf bytes.Buffer
+
+	t := &http2Client{
+		ctx:        ctx,
+		target:     addr.Addr,
+		userAgent:  opts.UserAgent,
+		md:         addr.Metadata,
+		conn:       conn,
+		remoteAddr: conn.RemoteAddr(),
+		localAddr:  conn.LocalAddr(),
+		authInfo:   authInfo,
+		// client 初始的流id是基数, 从1开始
+		nextID:          1,
+		writeableChan:   make(chan int, 1),
+		shutdownChan:    make(chan struct{}),
+		errorChan:       make(chan struct{}),
+		goAway:          make(chan struct{}),
+		awakenKeepalive: make(chan struct{}, 1),
+		framer:          newFramer(conn),
+		hBuf:            &buf,
+		hEnc:            hpack.NewEncode(&buf),
+		controlBuf:      newControlBuffer(),
+		fc:              &inFlow{limit: uint32(icwz)},
+		sendQuotaPool:   newQuotaPool(defaultWindowSize),
+		scheme:          scheme,
+		state:           reachable,
+		// 活跃的流
+		activeStreams: make(map[uint32]*Stream),
+		// 和scheme相对应
+		isSecure: isSecure,
+		creds:    opts.PerRPCCredentials,
+		// 同时最大的流client
+		maxStreams:        defaultMaxStreamClient,
+		streamsQuota:      newQuotaPool(defaultMaxStreamClient),
+		streamSendQuota:   defaultWindoSize,
+		kp:                kp,
+		statsHandler:      opts.StatsHandler,
+		initialWindowSize: initalWindowSize, // initalWindowSize = defaultWindoSize
+	}
+
+	if opts.InitialWindowSize >= defaultWindoSize {
+		t.initialWindownSize = opts.InitialWindowSize
+		dynamicWindow = false
+	}
+	// 如果opts中设置的初始窗口大小大于默认值,则使用opts中的值,不需要动态调整
+	// 否则会动态调整
+	if dynamicWindow {
+		t.bdpEst = &bdpEstimator{
+			bdp:               initialWindowSize,
+			updateFlowControl: t.updateFlowControl,
+		}
+	}
+
+	// 这里往awakenKeepalive中写入之后,它就不能再写了
+	// 只有keepalive这个goroutine能够使它再次能写
+	// keepalive routine的作用就是保活
+	t.awakenKeepalive <- struct{}{}
+	if t.statsHandler != nil {
+		t.ctx = t.statsHandler.TagConn(t.ctx, &stats.ConnTagInfo{
+			RemoteAddr: t.remoteAddr,
+			LocalAddr:  t.localAddr,
+		})
+		connBegin := &stats.ConnBegin{
+			Client: true,
+		}
+		t.statsHandler.HandleConn(t.ctx, connBegin)
+	}
 }
