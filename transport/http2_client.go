@@ -170,13 +170,13 @@ func newHTTP2Client(ctx context.Context, addr TargetInfo, opts ConnectOptions) (
 		// 同时最大的流client
 		maxStreams:        defaultMaxStreamClient,
 		streamsQuota:      newQuotaPool(defaultMaxStreamClient),
-		streamSendQuota:   defaultWindoSize,
+		streamSendQuota:   defaultWindowSize,
 		kp:                kp,
 		statsHandler:      opts.StatsHandler,
-		initialWindowSize: initalWindowSize, // initalWindowSize = defaultWindoSize
+		initialWindowSize: initalWindowSize, // initalWindowSize = defaultWindowSize
 	}
 
-	if opts.InitialWindowSize >= defaultWindoSize {
+	if opts.InitialWindowSize >= defaultWindowSize {
 		t.initialWindownSize = opts.InitialWindowSize
 		dynamicWindow = false
 	}
@@ -203,4 +203,47 @@ func newHTTP2Client(ctx context.Context, addr TargetInfo, opts ConnectOptions) (
 		}
 		t.statsHandler.HandleConn(t.ctx, connBegin)
 	}
+
+	// 起一个routine去读取消息
+	// 每一个transport会有一个routine从网络中读取HTTP2 frame
+	// 然后把frame分发给每个对应的stream实体
+	go t.reader()
+
+	// 先写一个client的序(需要了解HTTP2协议)
+	n, err := t.conn.Write(clientPreface)
+	if err != nil {
+		t.Close()
+		return nil, connectionErrorf(true, err, "transport: failed to write client preface: %v", err)
+	}
+	if n != len(clientPreface) {
+		t.Close()
+		return nil, connectionErrorf(true, err, "transport: preface mismatch, wrote %d bytes; want %d:", n, len(clientPreface))
+	}
+
+	if t.initialWindownSize != defaultWindowSize {
+		err = t.framer.writeSettings(true, http2.Setting{
+			ID:  http2.SettingInitialWindowSize,
+			Val: uint32(t.initialWindownSize),
+		})
+	} else {
+		err = t.framer.writeSettings(true)
+	}
+	if err != nil {
+		t.Close()
+		return nil, connectionErrorf(true, err, "transport: failed to write initial settings frame: %v", err)
+	}
+
+	// 在需要的情况下调整连接的流控窗口
+	if delta := uint32(icwz - defaultWindowSize); delta > 0 {
+		if err := t.framer.writeWindowUpdate(true, 0, delta); err != nil {
+			t.Close()
+			return nil, connectionErrorf(true, err, "transport: failed to write window update: %v", err)
+		}
+	}
+	go t.controller()
+	if t.kp.Time != infinity {
+		go t.keepalive()
+	}
+	t.writeableChan <- 0
+	return t, nil
 }
