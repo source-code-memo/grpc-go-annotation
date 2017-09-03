@@ -165,3 +165,98 @@ func (s *Server) Serve(lis net.Listenr) error {
 		go s.handleRawConn(rawconn)
 	}
 }
+
+func (s *Server) useTransportAuthenticator(rawconn net.Conn) (net.conn, credentials.AuthInfo, error) {
+	if s.opts.creds != nil {
+		return rawconn, nil, nil
+	}
+	// 如果设置了证书授权,则需要先经过握手处理
+	return s.opts.creds.ServerHandshake(rawconn)
+}
+
+// handleRawConn 在routine内处理接收到的连接
+func (s *Server) handleRawConn(rawconn net.Conn) {
+	// 如果设置了证书(https),则需要经过证书的握手验证
+	conn, authInfo, err := s.useTransportAuthenticator(rawconn)
+	if err != nil {
+		s.mu.Lock()
+		s.errorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
+		s.mu.Unlock()
+		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", rawConn.RemoteAddr(), err)
+		// 如果ServerHandshake返回ErrConnDispatched错误,不关闭连接
+		if err != credentials.ErrConnDispatched {
+			rawconn.Close()
+		}
+	}
+
+	s.mu.Lock()
+	// server 已经被关闭
+	if s.conns == nil {
+		s.mu.Unlock()
+		conn.Close()
+		return
+	}
+	s.mu.Unlock()
+
+	if s.opts.useHandlerImpl {
+		s.serveUsingHandler(conn)
+	} else {
+		s.serveHTTP2Transport(conn, authInfo)
+	}
+}
+
+// serveHTTP2Transport 创建一个HTTP2 transport
+// 处理transport上的流
+func (s *Server) serveHTTP2Transport(conn net.Conn, authInfo credentials.AuthInfo) {
+	config := &transport.ServerConfig{
+		// 最大的并发流数
+		MaxStreams: s.opts.maxConcurrentStreams,
+	}
+
+	st, err := transport.NewServerTransport("http2", conn, config)
+	if err != nil {
+		s.mu.Lock()
+		s.errorf("NewServerTransport(%q) failed: %v", conn.RemoteAddr(), err)
+		s.mu.Unlock()
+		conn.Close()
+		grpclog.Warningln("grpc: Server.Serve failed to create ServerTransport: ", err)
+	}
+
+	if !s.addConn(st) {
+		st.Close()
+		return
+	}
+	s.serveStreams(st)
+}
+
+// server 可以包含多个tranport的连接(每条transport上可以有多个stream,一条连接对应一个transport)
+func (s *Server) addConn(c io.Closer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conns == nil || s.drain {
+		return false
+	}
+	s.conns[c] = true
+	return true
+}
+
+func (s *Server) serverStreams(st transport.ServerTransport) {
+	defer s.removeConn(st)
+	defer st.Close()
+	var wg sync.WaitGroup
+	st.HandleStreams(func(stream *transport.Stream) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.handleStream(st, stream, s.traceInfo(st, stream))
+		}()
+	}, func(ctx context.Context, method string) context.Context {
+		// Trace 开关
+		if !EnableTracing {
+			return ctx
+		}
+		tr := trace.New("grpc.Recv."+methodFamily(method), method)
+		return trace.NewContext(ctx, tr)
+	})
+	wg.Wait()
+}

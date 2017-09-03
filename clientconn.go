@@ -311,7 +311,7 @@ func (cc *ClientConn) resetAddrConn(addr Address, block bool, tearDownErr error)
 			}
 			return err
 		}
-		// 开启一个后台进程去监控连接的状态
+		// 开启一个后台进程去监控连接的状态,在特定的情况下可以重新建立连接
 		go ac.transportMonitor()
 	} else {
 		// 开启一个routine去异步建立连接
